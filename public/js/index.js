@@ -84,11 +84,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 errorMessage.textContent = 'Please use a non-disposable email domain.';
             } else {
                 // Proceed with server-side validation if domain is valid
-                const response = await fetch('/validate-email', {
+                const response = await fetch('https://email-validation-tool-ezx3.onrender.com/validate-email', { 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email }),
-                });
+                  });
+                  
 
                 const data = await response.json();
 
