@@ -33,6 +33,10 @@ const limiter = rateLimit({
 app.use('/validate-email', limiter);
 
 const mailosaur = new MailosaurClient(process.env.MAILOSAUR_API_KEY);
+const mailinatorApiKey = process.env.MAILINATOR_API_KEY;
+const mailinatorApiUrl = 'https://api.mailinator.com/api/v2/domain';
+
+const blacklistedPatterns = [/invalid/, /test/, /fake/, /noreply/, /donotreply/];
 
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -42,76 +46,80 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.post(
-  '/validate-email',
-  [
+app.post('/validate-email', [
     body('email').trim().isEmail().normalizeEmail().withMessage('Invalid email format.'),
-  ],
-  async (req, res) => {
+], async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn('Validation error', { errors: errors.array(), ip: req.ip });
-      return res.status(400).json({
-        valid: false,
-        message: errors.array()[0].msg,
-        details: {},
-      });
+        logger.warn('Validation error', { errors: errors.array(), ip: req.ip });
+        return res.status(400).json({ valid: false, message: errors.array()[0].msg, details: {} });
     }
 
     const email = req.body.email;
-    const mailosaurServerId = process.env.MAILOSAUR_SERVER_ID;
+    const domain = email.split('@')[1]?.toLowerCase();
+    const localPart = email.split('@')[0]?.toLowerCase();
 
-    if (!process.env.MAILOSAUR_API_KEY || !mailosaurServerId) {
-      logger.error('Mailosaur API key or server ID missing in .env file');
-      return res.status(500).json({
-        valid: false,
-        message: 'Server configuration error: API keys missing.',
-        details: {},
-      });
+    // Blacklist Check
+    if (blacklistedPatterns.some(pattern => pattern.test(localPart))) {
+        return res.json({
+            valid: false,
+            message: 'This email appears to be invalid or potentially false.',
+            details: {},
+        });
     }
 
-    try {
-      const domain = email.split('@')[1].toLowerCase();
-      const freeEmailDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com'];
-      const disposableEmailDomains = ['mailinator.com', 'tempmail.com', 'guerrillamail.com', '10minutemail.com'];
-      const roleBasedPrefixes = ['admin', 'support', 'info', 'sales', 'contact', 'team'];
+    const freeEmailDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com'];
+    const disposableEmailDomains = ['mailinator.com', 'tempmail.com', 'guerrillamail.com', '10minutemail.com'];
+    const roleBasedPrefixes = ['admin', 'support', 'info', 'sales', 'contact', 'team'];
 
-      const details = {
+    const details = {
         isFreeEmail: freeEmailDomains.includes(domain),
         isDisposableEmail: disposableEmailDomains.includes(domain),
-        isRoleBasedEmail: roleBasedPrefixes.some(prefix => email.toLowerCase().startsWith(`${prefix}@`)),
+        isRoleBasedEmail: roleBasedPrefixes.some(prefix => localPart.startsWith(prefix)),
         domain: domain,
-      };
+    };
 
-      const testEmailAddress = `test-${Math.random().toString(36).substring(2, 15)}@${mailosaurServerId}.mailosaur.net`;
-      const domainCheck = await mailosaur.servers.get(mailosaurServerId);
-      const isDomainValid = domainCheck ? true : false;
+    try {
+        // Validate domain with Mailinator API
+        let isDomainValid = true;
+        if (mailinatorApiKey) {
+            const response = await fetch(`${mailinatorApiUrl}?domain=${encodeURIComponent(domain)}&key=${mailinatorApiKey}`);
+            const data = await response.json();
+            isDomainValid = !data.disposable;
+        }
 
-      if (!isDomainValid) {
-        throw new Error('Invalid domain according to Mailosaur.');
-      }
+        if (!isDomainValid) {
+            return res.json({
+                valid: false,
+                message: 'Domain is associated with disposable or fake email services.',
+                details,
+            });
+        }
 
-      res.json({
-        valid: true,
-        message: 'Email format is valid.',
-        details: {
-          ...details,
-          test_email_address: testEmailAddress,
-          simulated_validation: true,
-        },
-      });
+        // Simulate validation with Mailosaur (if enabled)
+        let testEmailAddress = null;
+        if (process.env.MAILOSAUR_SERVER_ID) {
+            testEmailAddress = `test-${Math.random().toString(36).substring(2, 15)}@${process.env.MAILOSAUR_SERVER_ID}.mailosaur.net`;
+        }
+
+        res.json({
+            valid: true,
+            message: 'Email is valid and recognized.',
+            details: {
+                ...details,
+                test_email_address: testEmailAddress,
+                simulated_validation: Boolean(testEmailAddress),
+            },
+        });
     } catch (error) {
-      logger.error('Validation Error', { error: error.message, email, ip: req.ip });
-      res.json({
-        valid: false,
-        message: 'Email validation failed.',
-        details: {
-          error: error.message,
-        },
-      });
+        logger.error('Validation Error', { error: error.message, email, ip: req.ip });
+        res.json({
+            valid: false,
+            message: 'Email validation failed.',
+            details: { error: error.message },
+        });
     }
-  }
-);
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
